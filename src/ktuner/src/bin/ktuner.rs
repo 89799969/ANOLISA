@@ -12,6 +12,49 @@ struct Cli {
     command: Commands,
 }
 
+/// What `tune` can do about the recommendations it gathered.
+///
+/// `Optimal` is reserved for a host with nothing to recommend: recommendations
+/// that exist but cannot be applied here (read-only `/proc/sys`, or a parameter
+/// that is dangerous to change at runtime) are `Blocked`, because reporting them
+/// as "optimal" contradicts both `check`, which lists them and exits 1, and
+/// `fix`, which refuses the same parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlanStatus {
+    Optimal,
+    Blocked,
+    Plannable,
+}
+
+impl PlanStatus {
+    fn label(self) -> &'static str {
+        match self {
+            PlanStatus::Optimal => "optimal",
+            PlanStatus::Blocked => "blocked",
+            PlanStatus::Plannable => "planned",
+        }
+    }
+
+    /// Optimal and a plan worth showing exit 0; blocked work is exit 1 so a
+    /// script cannot mistake it for a tuned host.
+    fn exit_code(self) -> i32 {
+        match self {
+            PlanStatus::Blocked => 1,
+            _ => 0,
+        }
+    }
+}
+
+fn plan_status(requested: usize, appliable: usize) -> PlanStatus {
+    if requested == 0 {
+        PlanStatus::Optimal
+    } else if appliable == 0 {
+        PlanStatus::Blocked
+    } else {
+        PlanStatus::Plannable
+    }
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Diagnose system and output tuning recommendations
@@ -156,19 +199,35 @@ fn cmd_tune(dry_run: bool, conservative: bool, cat: Option<String>) -> Result<i3
     if conservative {
         recs.retain(|r| r.confidence == rules::Confidence::High);
     }
+    let requested = recs.len();
     recs.retain(|r| r.writable && !category::is_runtime_dangerous(&r.param));
 
     if recs.is_empty() {
-        let output = json!({ "status": "optimal", "applied": 0 });
+        // "optimal" means there was nothing to recommend. When recommendations
+        // existed but none of them can be applied here (read-only /proc/sys or a
+        // runtime-dangerous parameter), saying "optimal" and exiting 0 hides
+        // work that `check` reports and `fix` refuses -- so report the blocked
+        // case instead and exit non-zero.
+        let status = plan_status(requested, 0);
+        let output = json!({
+            "status": status.label(),
+            "applied": 0,
+            "recommendations": requested,
+        });
         println!("{}", serde_json::to_string_pretty(&output)?);
-        return Ok(0);
+        return Ok(status.exit_code());
     }
 
     if dry_run {
         let recs_json: Vec<serde_json::Value> = recs.iter().map(rec_json).collect();
-        let output = json!({ "dry_run": true, "would_apply": recs_json });
+        let output = json!({
+            "dry_run": true,
+            "status": plan_status(requested, recs.len()).label(),
+            "blocked": requested - recs.len(),
+            "would_apply": recs_json,
+        });
         println!("{}", serde_json::to_string_pretty(&output)?);
-        return Ok(0);
+        return Ok(plan_status(requested, recs.len()).exit_code());
     }
 
     let applied = tuner::apply_quiet(&recs)?;
@@ -303,6 +362,29 @@ mod tests {
     use std::io::Write;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn test_plan_status_distinguishes_optimal_from_blocked() {
+        // Nothing to recommend: genuinely optimal.
+        assert_eq!(plan_status(0, 0), PlanStatus::Optimal);
+        assert_eq!(plan_status(0, 0).label(), "optimal");
+        assert_eq!(plan_status(0, 0).exit_code(), 0);
+
+        // Recommendations exist and can be applied.
+        assert_eq!(plan_status(3, 3), PlanStatus::Plannable);
+        assert_eq!(plan_status(3, 3).exit_code(), 0);
+
+        // Recommendations exist but none can be applied here: this is the case
+        // that used to print {"status":"optimal","applied":0} and exit 0 while
+        // `check` reported the same parameters and `fix` calls them read-only.
+        assert_eq!(plan_status(3, 0), PlanStatus::Blocked);
+        assert_ne!(
+            plan_status(3, 0).label(),
+            "optimal",
+            "a host with blocked recommendations must not be called optimal"
+        );
+        assert_eq!(plan_status(3, 0).exit_code(), 1);
+    }
 
     struct CurrentFile(PathBuf);
 
