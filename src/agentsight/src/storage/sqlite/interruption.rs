@@ -245,10 +245,10 @@ impl InterruptionStore {
                     // Compare normalized error keys (handles nested JSON vs clean message)
                     if let Some(ref detail_str) = detail_opt {
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(detail_str) {
-                            let stored_error =
-                                v.get("error").and_then(|e| e.as_str()).unwrap_or("");
-                            if errors_match(stored_error, target) {
-                                return true;
+                            if let Some(stored_error) = stored_error_message(&v) {
+                                if errors_match(stored_error, target) {
+                                    return true;
+                                }
                             }
                         }
                     }
@@ -808,6 +808,30 @@ fn errors_match(a: &str, b: &str) -> bool {
     }
     // Substring containment: if one fully contains the other
     na.contains(&nb) || nb.contains(&na)
+}
+
+/// The error message a stored `detail` object actually records, if any.
+///
+/// Reads the same three spellings the normalizer does, but returns `None`
+/// instead of an empty string when nothing is recorded: `errors_match` uses
+/// substring containment, and an empty string is contained in every error, so a
+/// detail like `{"status_code": 500, "error": null}` — what the detector writes
+/// for a status-code-only detection — would otherwise report every later error
+/// of the same type as a duplicate and suppress it.
+fn stored_error_message(detail: &serde_json::Value) -> Option<&str> {
+    let candidate = detail
+        .get("error")
+        .and_then(|e| {
+            e.as_str()
+                .or_else(|| e.get("message").and_then(|m| m.as_str()))
+        })
+        .or_else(|| detail.get("message").and_then(|m| m.as_str()))?;
+    let trimmed = candidate.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(candidate)
+    }
 }
 
 #[cfg(test)]
@@ -1610,6 +1634,41 @@ mod tests {
             &InterruptionType::LlmError,
             Some("completely different error")
         ));
+    }
+
+    /// A stored detail with no recorded error must not match every candidate.
+    ///
+    /// The detector writes `{"status_code": 500, "error": null}` for a
+    /// status-code-only detection. Reading that through `as_str().unwrap_or("")`
+    /// produced an empty string, and `errors_match` uses substring containment,
+    /// so the row matched any later error of the same type and the insert was
+    /// skipped as a duplicate.
+    #[test]
+    fn exists_for_conversation_null_stored_error_does_not_match() {
+        let store = temp_store();
+
+        let mut absent = make_event("conv-null-err", InterruptionType::LlmError);
+        absent.interruption_id = "int-null-1".to_string();
+        absent.detail = Some(r#"{"status_code":500,"model":"m"}"#.to_string());
+        store.insert(&absent).unwrap();
+
+        let mut nulled = make_event("conv-null-err2", InterruptionType::LlmError);
+        nulled.interruption_id = "int-null-2".to_string();
+        nulled.detail = Some(r#"{"status_code":500,"error":null}"#.to_string());
+        store.insert(&nulled).unwrap();
+
+        for conv in ["conv-null-err", "conv-null-err2"] {
+            assert!(
+                !store.exists_for_conversation(
+                    conv,
+                    &InterruptionType::LlmError,
+                    Some("invalid request: unknown field 'foo'")
+                ),
+                "{conv}: a detail without a recorded error must not swallow a new error"
+            );
+            // With no candidate error the row is still a duplicate by definition.
+            assert!(store.exists_for_conversation(conv, &InterruptionType::LlmError, None));
+        }
     }
 
     // ── agent_crash_exists_recent ────────────────────────────────────────────
