@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterAll, describe, it, expect } from 'vitest';
 import {
   LoadedSettings,
   SettingScope,
@@ -13,14 +16,29 @@ import {
   type SettingsFile,
 } from './settings.js';
 
-/** A scope file holding `settings`, with the on-disk copy as the same object. */
+/**
+ * `setValue` calls `saveSettings`, which creates the file's directory and
+ * writes to disk, so each scope needs a writable per-test path - a fixed
+ * fixture path like `/mock` fails every assertion with EACCES on a normal
+ * non-root run before reaching them.
+ */
+const tempDirs: string[] = [];
+
 function scopeFile(settings: Settings): SettingsFile {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cosh-scope-'));
+  tempDirs.push(dir);
   return {
-    path: `/mock/${Math.random().toString(36).slice(2)}.json`,
+    path: path.join(dir, 'settings.json'),
     settings,
     originalSettings: structuredClone(settings),
   } as SettingsFile;
 }
+
+afterAll(() => {
+  for (const dir of tempDirs.splice(0)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 function loaded(parts: {
   system?: Settings;
@@ -67,13 +85,17 @@ describe('hooks persistence keeps to one scope', () => {
       settings.workspace.settings as Record<string, unknown>
     )['hooks'] as Record<string, unknown>;
 
-    const written = withScopedHooks<Record<string, unknown>>(workspaceHooks, [
-      'some-hook',
-    ]);
-    settings.setValue(SettingScope.Workspace, 'hooks' as never, written as never);
+    const written = withScopedHooks(workspaceHooks, ['some-hook']);
+    settings.setValue(
+      SettingScope.Workspace,
+      'hooks' as never,
+      written as never,
+    );
 
     const onDisk = settings.workspace.settings as Record<string, unknown>;
-    expect((onDisk['hooks'] as Record<string, unknown>)['PostToolUse']).toBeUndefined();
+    expect(
+      (onDisk['hooks'] as Record<string, unknown>)['PostToolUse'],
+    ).toBeUndefined();
     expect(onDisk['hooks']).toMatchObject({ disabled: ['some-hook'] });
   });
 
@@ -86,7 +108,7 @@ describe('hooks persistence keeps to one scope', () => {
     settings.setValue(
       SettingScope.Workspace,
       'hooks' as never,
-      withScopedHooks<Record<string, unknown>>(undefined, ['some-hook']) as never,
+      withScopedHooks(undefined, ['some-hook']) as never,
     );
 
     const serialized = JSON.stringify(settings.workspace.settings);
@@ -96,12 +118,18 @@ describe('hooks persistence keeps to one scope', () => {
   it('keeps the workspace file\u2019s own hooks while updating disabled', () => {
     const own = {
       hooks: [
-        { type: 'command' as const, name: 'project-hook', command: '$HOME/p.sh' },
+        {
+          type: 'command' as const,
+          name: 'project-hook',
+          command: '$HOME/p.sh',
+        },
       ],
     };
     const settings = loaded({
       user: { hooks: { PreToolUse: [USER_HOOK] } } as unknown as Settings,
-      workspace: { hooks: { ...own, disabled: ['old'] } } as unknown as Settings,
+      workspace: {
+        hooks: { ...own, disabled: ['old'] },
+      } as unknown as Settings,
     });
     const workspaceHooks = (
       settings.workspace.settings as Record<string, unknown>
@@ -110,10 +138,7 @@ describe('hooks persistence keeps to one scope', () => {
     settings.setValue(
       SettingScope.Workspace,
       'hooks' as never,
-      withScopedHooks<Record<string, unknown>>(workspaceHooks, [
-        'old',
-        'new',
-      ]) as never,
+      withScopedHooks(workspaceHooks, ['old', 'new']) as never,
     );
 
     const written = (settings.workspace.settings as Record<string, unknown>)[

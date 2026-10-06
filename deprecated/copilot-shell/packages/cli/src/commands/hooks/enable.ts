@@ -29,7 +29,9 @@ export async function handleEnableHook(hookName: string): Promise<void> {
     // Read the disabled list from the merged view (any scope may have populated
     // it) but write back only the workspace scope's own hooks object: writing the
     // merged object copies every other scope's hooks into this file, and those
-    // hooks then merge with themselves and fire twice.
+    // hooks then merge with themselves and fire twice. The hooks come from
+    // originalSettings - the settings copy is already env-resolved, so its
+    // `$HOME/...` commands would freeze to absolute paths on disk.
     const mergedSettings = settings.merged as
       | Record<string, unknown>
       | undefined;
@@ -48,7 +50,7 @@ export async function handleEnableHook(hookName: string): Promise<void> {
     // Remove hook from disabled list
     const newDisabledHooks = disabledHooks.filter((h) => h !== hookName);
     const workspaceHooks = (
-      settings.workspace.settings as Record<string, unknown>
+      settings.workspace.originalSettings as Record<string, unknown>
     )['hooks'] as Record<string, unknown> | undefined;
     const newHooksSettings = withScopedHooks(workspaceHooks, newDisabledHooks);
 
@@ -80,4 +82,3 @@ export const enableCommand: CommandModule = {
     process.exit(0);
   },
 };
-

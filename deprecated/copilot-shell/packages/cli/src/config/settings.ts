@@ -218,17 +218,18 @@ function setNestedProperty(
  * `setValue` assigns the whole value it is given, so persisting a derived object
  * - for example the merged view with one entry added - copies every other scope's
  * hooks into this file, and those hooks then merge with themselves on the next
- * load (the hook arrays use `MergeStrategy.CONCAT`) and fire twice. The merged
- * view is also the env-resolved copy, so a `$HOME/bin/hook.sh` command would be
- * frozen to an absolute path for everyone who shares the file.
+ * load (the hook arrays use `MergeStrategy.CONCAT`) and fire twice. Callers must
+ * pass the scope's own hooks from `originalSettings`: the `settings` copy has
+ * already been through `resolveEnvVarsInObject`, so its `$HOME/bin/hook.sh`
+ * command would be frozen to an absolute path for everyone who shares the file.
  *
  * Only `disabled` changes here, and only `hooks` is materialized.
  */
-export function withScopedHooks<T extends Record<string, unknown>>(
+export function withScopedHooks(
   current: Record<string, unknown> | undefined | null,
   disabled: string[],
-): T {
-  return { ...(current ?? {}), disabled } as T;
+): Record<string, unknown> {
+  return { ...(current ?? {}), disabled };
 }
 
 export function needsMigration(settings: Record<string, unknown>): boolean {
